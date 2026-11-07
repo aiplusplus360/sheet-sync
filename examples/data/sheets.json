@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "rows": [
+    {
+      "id": "c-001",
+      "deleted": false,
+      "fields": {"name": "Acme", "plan": "enterprise", "price": 99, "seats": 5},
+      "versions": {"name": 1, "plan": 2, "price": 1, "seats": 1}
+    },
+    {
+      "id": "c-002",
+      "deleted": false,
+      "fields": {"name": "Globex", "plan": "pro", "price": 69},
+      "versions": {"name": 1, "plan": 1, "price": 2},
+      "modified_at": "2026-11-06T11:00:00+00:00"
+    },
+    {
+      "id": "c-003",
+      "deleted": false,
+      "fields": {"name": "Initech", "plan": "starter", "price": 39},
+      "versions": {"name": 1, "plan": 1, "price": 3}
+    },
+    {
+      "id": "c-005",
+      "deleted": false,
+      "fields": {"name": "Vandelay", "plan": "enterprise", "price": 249},
+      "versions": {"name": 1, "plan": 1, "price": 1}
+    }
+  ]
+}

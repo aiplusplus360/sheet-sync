@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sheet-sync"
+version = "1.0.0"
+description = "Two-way sync with three-way merge, tombstones and a JSONL audit trail."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "aiplusplus360" }]
+keywords = ["sync", "merge", "conflict-resolution", "postgres", "google-sheets", "etl"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Office/Business :: Financial :: Spreadsheet",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+sheetsync = "sheetsync.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/aiplusplus360/sheet-sync"
+
+[tool.setuptools]
+packages = ["sheetsync"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

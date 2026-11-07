@@ -1,0 +1,215 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: python -m pip install --upgrade pip && python -m pip install -e .
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Doctests
+        run: |
+          python - <<'PY'
+          import doctest, importlib, sys
+          total = 0
+          for name in ("sheetsync", "sheetsync.model", "sheetsync.merge", "sheetsync.engine",
+                       "sheetsync.adapters", "sheetsync.changelog", "sheetsync.cli"):
+              result = doctest.testmod(importlib.import_module(name))
+              print(name, result)
+              total += result.attempted
+              if result.failed:
+                  sys.exit(1)
+          assert total >= 30, total
+          PY
+
+      - name: Demo
+        run: python examples/demo.py
+
+      - name: CLI contract
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          cp examples/data/*.json "$work"/
+          base="$work/base.json"; left="$work/postgres.json"; right="$work/sheets.json"
+
+          # a dry run reports and writes nothing
+          set +e
+          python -m sheetsync sync --base "$base" --left "$left" --right "$right" \
+            --dry-run --json > "$work/plan.json"
+          status=$?
+          set -e
+          test "$status" -eq 3
+
+          python - "$work" <<'PY'
+          import json, sys
+          from pathlib import Path
+          work = Path(sys.argv[1])
+          plan = json.loads((work / "plan.json").read_text())
+          assert plan["counts"] == {"added": 1, "modified": 2, "removed": 1,
+                                    "resurrected": 0, "unchanged": 0, "held": 1}, plan["counts"]
+          conflict = plan["rows"][1]
+          assert conflict["row"] == "c-002" and conflict["kind"] == "conflict", conflict
+          assert conflict["applied"] is False
+          detail = conflict["conflicts"][0]
+          assert (detail["base"], detail["left"], detail["right"]) == (49, 59, 69), detail
+          assert detail["resolved"] is False
+          rows = json.loads((work / "sheets.json").read_text())["rows"]
+          prices = {row["id"]: row["fields"].get("price") for row in rows}
+          assert prices["c-002"] == 69, prices
+          assert "c-004" not in prices, prices
+          PY
+
+          # apply: four rows written, the conflict row untouched
+          set +e
+          python -m sheetsync sync --base "$base" --left "$left" --right "$right" \
+            --update-base --journal "$work/log.jsonl" --now "2026-11-07T12:00:00+00:00" \
+            --json > "$work/applied.json"
+          status=$?
+          set -e
+          # a conflict outranks "rows were written": exit 3 even though four rows landed
+          test "$status" -eq 3
+
+          python - "$work" <<'PY'
+          import json, sys
+          from pathlib import Path
+          work = Path(sys.argv[1])
+          report = json.loads((work / "applied.json").read_text())
+          assert report["written"] == ["c-001", "c-003", "c-004", "c-005"], report["written"]
+
+          sheets = {row["id"]: row for row in json.loads((work / "sheets.json").read_text())["rows"]}
+          # both sides' independent edits survive
+          assert sheets["c-001"]["fields"]["plan"] == "enterprise"
+          assert sheets["c-001"]["fields"]["seats"] == 8
+          # the new row reached the sheet, the delete reached the sheet
+          assert sheets["c-004"]["fields"]["name"] == "Umbrella"
+          assert sheets["c-005"]["deleted"] is True
+          # the conflict was not resolved by force
+          assert sheets["c-002"]["fields"]["price"] == 69
+
+          postgres = {row["id"]: row for row in json.loads((work / "postgres.json").read_text())["rows"]}
+          assert postgres["c-001"]["fields"]["seats"] == 8
+          assert postgres["c-001"]["fields"]["plan"] == "enterprise"
+          assert postgres["c-005"]["deleted"] is True
+
+          entries = [json.loads(line) for line in (work / "log.jsonl").read_text().strip().splitlines()]
+          held = [entry for entry in entries if entry["row"] == "c-002"]
+          assert held and held[0]["applied"] is False and held[0]["kind"] == "conflict", held
+          assert entries[0]["ts"] == "2026-11-07T12:00:00+00:00"
+          PY
+
+          # the same run again has nothing to write, but the open conflict still
+          # exits 3: "settled" and "resolved" are different states
+          set +e
+          python -m sheetsync sync --base "$base" --left "$left" --right "$right" \
+            --update-base > "$work/again.txt"
+          status=$?
+          set -e
+          test "$status" -eq 3
+          grep -q "written: 0 row(s)" "$work/again.txt"
+
+          # an explicit policy resolves it and keeps the evidence
+          set +e
+          python -m sheetsync sync --base "$base" --left "$left" --right "$right" \
+            --policy prefer-newest --update-base --journal "$work/log.jsonl" \
+            --now "2026-11-07T12:05:00+00:00" > "$work/resolve.txt"
+          status=$?
+          set -e
+          test "$status" -eq 1
+          grep -q "policy:prefer-newest" "$work/resolve.txt"
+
+          python - "$work" <<'PY'
+          import json, sys
+          from pathlib import Path
+          work = Path(sys.argv[1])
+          postgres = {row["id"]: row for row in json.loads((work / "postgres.json").read_text())["rows"]}
+          sheets = {row["id"]: row for row in json.loads((work / "sheets.json").read_text())["rows"]}
+          assert postgres["c-002"]["fields"]["price"] == 69, postgres["c-002"]
+          assert sheets["c-002"]["fields"]["price"] == 69, sheets["c-002"]
+          # the resolution bumped the version past both sides' counters
+          assert postgres["c-002"]["versions"]["price"] == 3, postgres["c-002"]
+
+          entries = [json.loads(line) for line in (work / "log.jsonl").read_text().strip().splitlines()]
+          resolved = [e for e in entries if e["row"] == "c-002" and e["applied"]][0]
+          assert resolved["conflicts"][0]["resolved_by"] == "policy:prefer-newest"
+          assert resolved["conflicts"][0]["resolution"] == 69
+          PY
+
+          # third run: settled
+          set +e
+          python -m sheetsync sync --base "$base" --left "$left" --right "$right" \
+            --update-base > "$work/settled.txt"
+          status=$?
+          set -e
+          test "$status" -eq 0
+          grep -q "nothing to do" "$work/settled.txt"
+
+          # the example data in the repo is still untouched
+          test -z "$(git status --porcelain examples/data)"
+
+      - name: Failures are loud
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          cp examples/data/*.json "$work"/
+
+          set +e
+          python -m sheetsync diff --side "$work/nope.json" 2> "$work/err1.txt"
+          missing=$?
+          echo '{nope' > "$work/broken.json"
+          python -m sheetsync diff --side "$work/broken.json" 2> "$work/err2.txt"
+          broken=$?
+          python -m sheetsync sync --left "$work/base.json" --right "$work/sheets.json" \
+            --policy coin-flip 2> "$work/err3.txt"
+          policy=$?
+          set -e
+
+          test "$missing" -eq 2
+          test "$broken" -eq 2
+          test "$policy" -eq 2
+          grep -q "no such file" "$work/err1.txt"
+
+  package:
+    name: build and install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Install wheel and run the console script
+        run: |
+          python -m pip install dist/*.whl
+          sheetsync diff --base examples/data/base.json --side examples/data/postgres.json
+          set +e
+          sheetsync sync --base examples/data/base.json --left examples/data/postgres.json \
+            --right examples/data/sheets.json --dry-run
+          test "$?" -eq 3
+          python -c "import sheetsync; print(sheetsync.__version__)"
